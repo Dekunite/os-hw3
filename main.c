@@ -15,9 +15,6 @@
 #include <sys/sem.h>
 #include <sys/types.h>
 
-//  for handling signals
-#include <signal.h>
-
 #include <pthread.h>
 
 key_t READNEWS = 363;
@@ -42,12 +39,11 @@ int messageMemory = sizeof(d);
 
 int fetched[5];
 int readerSemaphores[5];
-int total = 0;
+int publishCount = 0;
 
 int shmid = 0;
 
 int publishSem = 0;
-int suspenderSem = 0;
 int fetchedSem = 0;
 
 int readerSem0 = 0;
@@ -83,24 +79,21 @@ void sem_wait(int semid, int val)
 void publish(char d) {
     //get PUBLISHED semaphore
     publishSem = semget(PUBLISHED, 1, 0);
-    //get READNEWS semaphore
-    suspenderSem = semget(READNEWS, 1, 0);
     //get fetched semaphore
     fetchedSem = semget(FETCHED, 1, 0);
 
-    //get fetched semaphore
+    //get reader semaphores
     readerSem0 = semget(READ0, 1, 0);
-    //get fetched semaphore
     readerSem1 = semget(READ1, 1, 0);
-    //get fetched semaphore
     readerSem2 = semget(READ2, 1, 0);
-    //get fetched semaphore
     readerSem3 = semget(READ3, 1, 0);
-    //get fetched semaphore
     readerSem4 = semget(READ4, 1, 0);
     //try to decrease published semaphore by 1
     //if it is already 0, previous news wasnt fetched by all subscribers
     sem_wait(publishSem, 1);
+
+    //increase publish count with every new message published
+    publishCount += 1;
 
     //get shared memory
     shmid = shmget(KEYSHM, messageMemory, 0);
@@ -108,37 +101,31 @@ void publish(char d) {
 
     //write message in memory
     *(messageMemoryPtr) = d;
-    printf("published the message: %c \n", d);
+    printf("Publisher %d published the message: %c \n",publishCount, d);
 
+    //go into critical section for fetched array
     sem_wait(fetchedSem,1);
     //set boolean array to all 0's
     int i = 0;
     for(i = 0; i < n; i++) {
         fetched[i] = 0;
     }
+    //leave critical section for fetched array
     sem_signal(fetchedSem,1);
 
     //detach the shared memory
     shmdt(messageMemoryPtr);
 
+    //signal every reader semaphore since there is a new message
     sem_signal(readerSem0,1);
     sem_signal(readerSem1,1);
     sem_signal(readerSem2,1);
     sem_signal(readerSem3,1);
     sem_signal(readerSem4,1);
 
-/*
-    pthread_create(&read1, NULL, reader, (void*) 0);
-    pthread_create(&read2, NULL, reader, (void*) 1);
-    pthread_create(&read3, NULL, reader, (void*) 2);
-    pthread_create(&read4, NULL, reader, (void*) 3);
-    pthread_create(&read5, NULL, reader, (void*) 4);
-    */
 }
 
 void read_news(int num) {
-    //get READNEWS semaphore
-    suspenderSem = semget(READNEWS, 1, 0);
     //get PUBLISHED semaphore
     publishSem = semget(PUBLISHED, 1, 0);
     //get fetched semaphore
@@ -150,15 +137,12 @@ void read_news(int num) {
 
     //read message message in memory
     char message = *(messageMemoryPtr);
-    printf("Process %d fetched the message: %c \n",num, message);
+    printf("Subscriber %d fetched the message: %c \n",num, message);
 
     //detach the message memory segment
     shmdt(messageMemoryPtr);
 
-    //if readnews == 0
-    //increase publish sem when all subs read the news
-    //if fetched[] all 1's
-    //sem_wait(fetchedSem,1);
+    //check if every subscriber fetched the news
     int allRead = 1;
     int i = 0;
     for(i = 0; i<n; i++) {
@@ -169,61 +153,44 @@ void read_news(int num) {
     }
     if(allRead == 1) {
         //new news can be published
-        total += 1;
         sem_signal(publishSem,1);
     }
-    //sem_signal(fetchedSem,1);
     
 }
 
 void* publisher(void* message) {
-    char mes = ((char) message);
+    char mes = (intptr_t) message;
     publish(mes);
     pthread_exit(NULL);
 }
 
 void* reader(void* number) {
-    //get PUBLISHED semaphore
-    suspenderSem = semget(READNEWS, 1, 0);
     //get fetched semaphore
     fetchedSem = semget(FETCHED, 1, 0);
-    //get fetched semaphore
+    //get reader semaphores
     readerSem0 = semget(READ0, 1, 0);
-    //get fetched semaphore
     readerSem1 = semget(READ1, 1, 0);
-    //get fetched semaphore
     readerSem2 = semget(READ2, 1, 0);
-    //get fetched semaphore
     readerSem3 = semget(READ3, 1, 0);
-    //get fetched semaphore
     readerSem4 = semget(READ4, 1, 0);
+
     while (1) {
-        //if(total >= 2) {
-          //  pthread_exit(NULL);
-        //}
-        int num = ((int) number);
+
+        int num = ((intptr_t) number);
+        //mark specific reader semaphore as fetched
+        //wait if there is no new message / SUSPEND
         sem_wait(readerSemaphores[num],1);
+        //critical section for fetched array
         sem_wait(fetchedSem,1);
         fetched[num] = 1;
         read_news(num);
+        //leave critical section for fetched array
         sem_signal(fetchedSem,1);
-        //printf("asdasdasdas \n");
-        /*
-        if(fetched[num] == 0) {
-            //sem_signal(fetchedSem,1);
-            read_news(num);
-            //set fetched[num] as read/1
-            
-        } else {
-            //suspend thread
-            //sem_signal(fetchedSem,1);
-            //printf("No new message for subscriber %d \n", num);
-            //sem_wait(suspenderSem,1);
-            //sem_signal(suspenderSem,1);
-            //sleep(3);
+
+        //exit subscriber thread if published messages equals to publisher count
+        if(publishCount == m) {
+            pthread_exit(NULL);
         }
-        */
-        //pthread_exit(NULL);
     }
 }
 
@@ -251,16 +218,12 @@ int main(int argc, char* argv[]) {
     publishSem = semget(PUBLISHED, 1, 0700|IPC_CREAT);
     semctl(publishSem, 0, SETVAL, 1);
 
-    //create READNEWS semaphore
-    //initialized as 0. The number of subscribers
-    suspenderSem = semget(READNEWS, 1, 0700|IPC_CREAT);
-    semctl(suspenderSem, 0, SETVAL, 0);
-
     //create fetched SEMAPHORE
     //initialized as 1 as there can only be 1 news 
     fetchedSem = semget(FETCHED, 1, 0700|IPC_CREAT);
     semctl(fetchedSem, 0, SETVAL, 1);
 
+    //create readers semaphores
     readerSem0 = semget(READ0, 1, 0700|IPC_CREAT);
     semctl(readerSem0, 0, SETVAL, 0);
 
@@ -276,56 +239,43 @@ int main(int argc, char* argv[]) {
     readerSem4 = semget(READ4, 1, 0700|IPC_CREAT);
     semctl(readerSem4, 0, SETVAL, 0);
 
+    //push readers semaphores in to a list
     readerSemaphores[0] = readerSem0;
     readerSemaphores[1] = readerSem1;
     readerSemaphores[2] = readerSem2;
     readerSemaphores[3] = readerSem3;
     readerSemaphores[4] = readerSem4;
 
-    
-    pthread_create(&pub1, NULL, publisher, (void*)(char)'u');
-    pthread_create(&pub2, NULL, publisher, (void*)(char)'o');
-    pthread_create(&pub3, NULL, publisher, (void*)(char)'k');
-    /*
-    pthread_create(&pub4, NULL, publisher, (void*)(char)'s');
-    pthread_create(&pub5, NULL, publisher, (void*)(char)'d');
-    pthread_create(&pub6, NULL, publisher, (void*)(char)'c');
-    */
-    //for (int k = 0; k<n; k++) {
-      //  pthread_create(&read1, NULL, reader, (void*) k);
-    //}
-    pthread_create(&read1, NULL, reader, (void*) 0);
-    pthread_create(&read2, NULL, reader, (void*) 1);
-    pthread_create(&read3, NULL, reader, (void*) 2);
-    pthread_create(&read4, NULL, reader, (void*) 3);
-    pthread_create(&read5, NULL, reader, (void*) 4);
-    /*
-    */
+    //create 3 publisher processes with different messages
+    pthread_create(&pub1, NULL, publisher, (void*)(intptr_t)'x');
+    pthread_create(&pub2, NULL, publisher, (void*)(intptr_t)'y');
+    pthread_create(&pub3, NULL, publisher, (void*)(intptr_t)'z');
+
+    //create 5 subscriber processes
+    pthread_create(&read1, NULL, reader, (void*)(intptr_t) 0);
+    pthread_create(&read2, NULL, reader, (void*)(intptr_t) 1);
+    pthread_create(&read3, NULL, reader, (void*)(intptr_t) 2);
+    pthread_create(&read4, NULL, reader, (void*)(intptr_t) 3);
+    pthread_create(&read5, NULL, reader, (void*)(intptr_t) 4);
 
     //  wait for threads to finish
     pthread_join(pub1, NULL);
     pthread_join(pub2, NULL);
     pthread_join(pub3, NULL);
-    /*
-    pthread_join(pub4, NULL);
-    pthread_join(pub5, NULL);
-    pthread_join(pub6, NULL);
-    */
     pthread_join(read1, NULL);
     pthread_join(read2, NULL);
     pthread_join(read3, NULL);
     pthread_join(read4, NULL);
     pthread_join(read5, NULL);
-    /*
-    */
 
     //remove all semaphores
-    semctl(suspenderSem, 0, IPC_RMID, 0);
     semctl(publishSem, 0, IPC_RMID, 0);
     semctl(fetchedSem, 0, IPC_RMID, 0);
-
-    printf("finito \n");
-    //pthread_exit(NULL);
+    semctl(readerSem0, 0, IPC_RMID, 0);
+    semctl(readerSem1, 0, IPC_RMID, 0);
+    semctl(readerSem2, 0, IPC_RMID, 0);
+    semctl(readerSem3, 0, IPC_RMID, 0);
+    semctl(readerSem4, 0, IPC_RMID, 0);
 
     return 0;
 }
